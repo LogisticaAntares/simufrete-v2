@@ -186,6 +186,10 @@
   .res-item.gold .res-val{ color:#6E560C; }
   .aviso{ background:var(--alerta-light); border:1px solid #F3D4A6; color:#7A4A0B; font-size:12.5px; padding:9px 12px; border-radius:var(--radius-sm); margin-bottom:12px; }
   .aviso.info{ background:var(--azul-50); border-color:var(--azul-100); color:var(--navy-700); }
+  .toggle-btn{ display:inline-flex; align-items:center; gap:8px; background:var(--azul-50); border:1px solid var(--azul-100); color:var(--navy-800); font-family:inherit; font-size:13px; font-weight:700; padding:9px 14px; border-radius:var(--radius-sm); cursor:pointer; }
+  .toggle-btn:hover{ border-color:var(--azul-600); }
+  .toggle-btn .chev{ display:inline-block; transition:transform .15s; color:var(--ouro-dark); }
+  .toggle-btn.open .chev{ transform:rotate(90deg); }
   .itens-wrap{ max-height:280px; overflow:auto; border:1px solid var(--borda); border-radius:var(--radius-sm); }
 
   /* ═════════ SIMULADOR ═════════ */
@@ -349,7 +353,7 @@
     parametros: null, perfis: [], historico: [], historicoCarregado: false,
     route: 'simulador',
   };
-  let ui = { cidadesQuery:'', cidadesTransp:'', historicoQuery:'', historicoVendedor:'', cadastroTab:'transportadoras', modal:null, comboOpen:false, busy:false };
+  let ui = { cidadesQuery:'', cidadesTransp:'', historicoQuery:'', historicoVendedor:'', cadastroTab:'transportadoras', modal:null, comboOpen:false, busy:false, abertos:{} };
   let loginForm = { email: lembrarAtivo() ? (lsGet(LS_EMAIL) || '') : '', senha:'', erro:'', info:'', loading:false, lembrar: lembrarAtivo() };
   let recuperacao = null;   // { erro, loading } quando o usuário chegou pelo link do e-mail
   let simForm = { cidadeId:null, cidadeQuery:'', peso:'', valor:'', volumes:'' };
@@ -505,7 +509,8 @@
   }
   function classificarCabecalho(s){
     const t = norm(s);
-    if(/peso/.test(t)) return 'peso';
+    if(/peso/.test(t)) return /unit/.test(t) ? 'peso_un' : 'peso';   // "Peso" = total do item (já multiplicado pela quantidade)
+    if(/cubag|cubic|m3|m³|volume/.test(t)) return 'cub';
     if(/cod/.test(t)) return 'cod';
     if(/descri/.test(t)) return 'desc';
     if(/unit/.test(t)) return 'vunit';
@@ -573,7 +578,7 @@
       const hdrIdx = linhas.findIndex(l => { const t = norm(l.itens.map(i=>i.s).join(' ')); return /cod/.test(t) && /descri/.test(t); });
       if(hdrIdx >= 0){
         cols = montarColunas(linhas[hdrIdx]);
-        if(cols.some(c=>c.k==='peso')) temPeso = true;
+        if(cols.some(c=>c.k==='peso' || c.k==='peso_un')) temPeso = true;
         if(!cliente) cliente = acharCliente(linhas, hdrIdx);
       }
       if(!cols) continue;
@@ -584,11 +589,16 @@
         if(l.itens.some(t => /^total\s*:?$/i.test(t.s)) || /^total\s*:/i.test(l.itens.map(t=>t.s).join(' '))){ fim = true; break; }
         const cel = distribuir(l, cols);
         const cod = (cel.cod||'').replace(/\s/g,'');
-        if(/^\d{2,}$/.test(cod)){
-          const q = numBR(cel.qtd), pu = numBR(cel.peso);
+        if(/^\d+$/.test(cod) && (cel.desc || cel.qtd)){
+          const q = numBR(cel.qtd);
+          // A coluna "Peso" já vem com o peso total do item (quantidade × peso unitário).
+          // Só multiplicamos quando o PDF trouxer explicitamente "Peso Unit.".
+          let pt = numBR(cel.peso), pu = numBR(cel.peso_un);
+          if(pt == null && pu != null && q != null) pt = +(pu*q).toFixed(3);
+          if(pu == null && pt != null && q) pu = +(pt/q).toFixed(4);
           itens.push({
             codigo: cod, descricao: (cel.desc||'').trim(), unidade: (cel.unid||'').trim(),
-            quantidade: q, peso_unit: pu, peso_total: (q!=null && pu!=null) ? +(q*pu).toFixed(3) : null,
+            quantidade: q, peso_unit: pu, peso_total: pt,
             valor_unit: numBR(cel.vunit), valor_total: numBR(cel.vtotal),
           });
           ultimoY = l.y;
@@ -626,12 +636,18 @@
     </tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
+  function toggle(chave, rotuloFechado, rotuloAberto){
+    const aberto = !!ui.abertos[chave];
+    return `<button class="toggle-btn ${aberto?'open':''}" aria-expanded="${aberto}" onclick="App.alternar('${chave}')">
+      <span class="chev">▸</span> ${aberto ? rotuloAberto : rotuloFechado}</button>`;
+  }
+
   function cardAnexo(){
     if(!anexo){
       return `<div class="card anexo-card">
         <div class="card-header"><div class="icon gold">📎</div><h2>Anexo do orçamento</h2></div>
         <div class="card-body"><div class="anexo-empty">
-          <p>Anexe o PDF do orçamento gerado pelo sistema. Os itens e o peso de cada um são lidos automaticamente, e o peso total (quantidade × peso unitário) preenche o campo de peso da simulação.</p>
+          <p>Anexe o PDF do orçamento gerado pelo sistema. Os itens e a coluna Peso são lidos automaticamente, e a soma do peso preenche o campo de peso da simulação.</p>
           <button class="btn-gold" ${lendoPdf?'disabled':''} onclick="App.escolherPdf()">${lendoPdf?'<span class="spin"></span>Lendo PDF…':'📎 Anexar orçamento (PDF)'}</button>
         </div></div>
       </div>`;
@@ -652,7 +668,8 @@
           <div class="res-item gold"><div class="res-lbl">Peso total</div><div class="res-val">${a.temPeso ? fmtKg(a.pesoTotal) : 'sem coluna de peso'}</div></div>
         </div>
         ${a.avisos.map(t=>`<div class="aviso">⚠️ ${esc(t)}</div>`).join('')}
-        ${tabelaItens(a.itens)}
+        ${toggle('itens', `📄 Ver itens do orçamento (${a.itens.length})`, `Ocultar itens do orçamento`)}
+        ${ui.abertos.itens ? `<div style="margin-top:10px;">${tabelaItens(a.itens)}</div>` : ''}
         <p class="card-note" style="margin:8px 0 0;">Arquivo: ${esc(a.arquivo)} · o PDF não é guardado, só os dados lidos vão para o histórico.</p>
       </div>
     </div>`;
@@ -814,22 +831,23 @@
           <div class="wh-detail"><div class="wh-dval tabular">${venc.modal==='fiorino'?fmtBRL(fio.custo_km):venc.modal==='iveco'?fmtBRL(ive.custo_km):'—'}</div><div class="wh-dlbl">R$/km</div></div>
         </div>
       </div>
+      <div class="card" style="margin-bottom:16px;"><div class="card-header"><div class="icon gold">📅</div><h2>Prazos e logística</h2></div>
+        <div class="card-body"><div class="prazo-box">
+          <div class="prazo-item"><div class="prazo-label">Dias de coleta</div><div class="prazo-val">${esc(c.dias_coleta||'—')}</div></div>
+          <div class="prazo-item"><div class="prazo-label">Prazo de entrega</div><div class="prazo-val">${esc(c.prazo_entrega||'—')}</div></div>
+          <div class="prazo-item"><div class="prazo-label">Prazo consolidado</div><div class="prazo-val">${esc(c.prazo_entrega_consolidado||'—')}</div></div>
+        </div></div></div>
       <div class="opcoes-grid">${fioCard}${iveCard}${trCard}${volCard}</div>
       <div class="rec-box ${rec.cls}"><div class="rec-title">${rec.title}</div><div class="rec-desc">${esc(r.recomendacao_categorica)}</div></div>
-      <div class="detalhe-grid">
+      <div style="margin-bottom:12px;">${toggle('detalhe', '🔎 Ver detalhamento de custos (Fiorino e Iveco)', 'Ocultar detalhamento de custos')}</div>
+      ${ui.abertos.detalhe ? `<div class="detalhe-grid">
         <div class="card"><div class="card-header"><div class="icon">🚐</div><h2>Detalhamento — Fiorino</h2></div>
           <div class="card-body" style="padding:0;"><table class="detalhe-table"><thead><tr><th>Componente</th><th style="text-align:right;">R$</th><th style="text-align:right;">% do custo</th></tr></thead>
           <tbody>${detalheRows(fio.detalhamento, num(fio.custo_total))}</tbody></table></div></div>
         <div class="card"><div class="card-header"><div class="icon">🚛</div><h2>Detalhamento — Iveco</h2></div>
           <div class="card-body" style="padding:0;"><table class="detalhe-table"><thead><tr><th>Componente</th><th style="text-align:right;">R$</th><th style="text-align:right;">% do custo</th></tr></thead>
           <tbody>${detalheRows(ive.detalhamento, num(ive.custo_total))}</tbody></table></div></div>
-      </div>
-      <div class="card"><div class="card-header"><div class="icon gold">📅</div><h2>Prazos e logística</h2></div>
-        <div class="card-body"><div class="prazo-box">
-          <div class="prazo-item"><div class="prazo-label">Dias de coleta</div><div class="prazo-val">${esc(c.dias_coleta||'—')}</div></div>
-          <div class="prazo-item"><div class="prazo-label">Prazo de entrega</div><div class="prazo-val">${esc(c.prazo_entrega||'—')}</div></div>
-          <div class="prazo-item"><div class="prazo-label">Prazo consolidado</div><div class="prazo-val">${esc(c.prazo_entrega_consolidado||'—')}</div></div>
-        </div></div></div>`;
+      </div>` : ''}`;
   }
 
   // ---- Base de Dados ----
@@ -1064,7 +1082,7 @@
           <tr><td>🏢 Transportadora</td><td class="num">${r.transportadora && r.transportadora.custo!=null?fmtBRL(r.transportadora.custo):'—'}</td><td>${statusHtml(r.transportadora && r.transportadora.selo)}</td></tr>
           ${r.volume?`<tr><td>📦 Por volume</td><td class="num">${fmtBRL(r.volume.custo)}</td><td class="muted">${r.volume.quantidade} vol.</td></tr>`:''}
         </tbody></table>
-        ${itens.length ? `<div style="font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:0.5px; color:var(--cinza); margin:4px 0 8px;">Itens do orçamento (${itens.length})</div>${tabelaItens(itens, true)}` : ''}
+        ${itens.length ? `${toggle('histItens', `📄 Ver itens do orçamento (${itens.length})`, 'Ocultar itens do orçamento')}${ui.abertos.histItens ? `<div style="margin-top:10px;">${tabelaItens(itens, true)}</div>` : ''}` : ''}
       </div>
       <div class="dialog-foot"><button class="btn-outline" onclick="App.closeModal()">Fechar</button></div>
     </div></div>`;
@@ -1261,6 +1279,7 @@
     },
 
     // --- anexo ---
+    alternar(chave){ ui.abertos[chave] = !ui.abertos[chave]; render(); },
     escolherPdf(){ const inp = document.getElementById('pdf-input'); inp.value=''; inp.click(); },
     async onPdf(file){
       if(!file) return;
